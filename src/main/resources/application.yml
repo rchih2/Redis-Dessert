@@ -1,0 +1,72 @@
+spring:
+  application:
+    name: redis-dessert
+
+  ai:
+    google:
+      genai:
+        api-key: ${GOOGLE_API_KEY}
+        chat:
+          options:
+            model: gemini-2.5-flash
+        embedding:
+          api-key: ${GOOGLE_API_KEY}
+          options:
+            model: gemini-embedding-001
+            dimensions: 768
+    vectorstore:
+      mongodb:
+        initialize-schema: true
+
+  # MySQL 設定
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/dessert_db?serverTimezone=Asia/Taipei&useSSL=false&allowPublicKeyRetrieval=true}
+    username: ${SPRING_DATASOURCE_USERNAME:user}
+    password: ${SPRING_DATASOURCE_PASSWORD:123}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 5
+      connection-timeout: 30000
+
+  # JPA 設定
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQLDialect
+
+  # Redis 設定（保留在 spring.data.redis 下，Redis 前綴沒有變動）
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+      password: ${SPRING_DATA_REDIS_PASSWORD:123}
+      database: 0
+      timeout: 2000ms
+
+  # MongoDB 設定：Spring Boot 4.x 起前綴改為 spring.mongodb，移除了 .data 這段
+  mongodb:
+    uri: ${SPRING_DATA_MONGODB_URI:mongodb://root:123@localhost:27017/dessert_ai_db?authSource=admin}
+
+server:
+  error:
+    include-message: always
+    include-stacktrace: always
+    include-binding-errors: always
+
+# RAG 向量資料庫配置
+app:
+  rag:
+    vector-store:
+      mode: ${APP_RAG_VECTORSTORE_MODE:mongodb-atlas}
+    chunk:
+      chunk-size: 500
+      min-chunk-size-chars: 200
+      min-chunk-length-to-embed: 10
+      max-num-chunks: 10000
+    chat:
+      top-k: 4
+      similarity-threshold: 0.5
