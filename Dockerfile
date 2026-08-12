@@ -17,16 +17,14 @@ FROM eclipse-temurin:21-jre-jammy
 
 WORKDIR /app
 
-# 建立非 root 使用者（先建立，稍後在檔案都準備好、權限都設定好之後才切換）
 RUN addgroup --system spring && adduser --system --ingroup spring spring
 
-# 從 build 階段複製打包好的 jar
-# pom.xml 已用 <finalName>app</finalName> 固定輸出檔名，這裡直接用固定路徑複製，避免萬用字元誤抓到錯誤的 jar
 COPY --from=build /app/target/app.jar app.jar
 
-# 切換成非 root 使用者執行，較安全
 USER spring:spring
 
 EXPOSE 8080
 
-ENTRYPOINT ["java", "-jar", "/app/app.jar"]
+ENV TZ=Asia/Taipei
+
+ENTRYPOINT ["java", "-Duser.timezone=Asia/Taipei", "-jar", "/app/app.jar"]

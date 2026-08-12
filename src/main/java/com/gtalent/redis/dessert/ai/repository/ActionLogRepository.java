@@ -43,4 +43,9 @@ public interface ActionLogRepository extends MongoRepository<ActionLog, String> 
      */
     long countByUserIdAndActionTypeAndTimestampBetween(
             String userId, ActionLog.ActionType actionType, LocalDateTime from, LocalDateTime to);
+    /**
+     * 判斷某個事件去重鍵是否已經處理過，供 EventLogConsumer 在 Kafka at-least-once
+     * 語意下做去重判斷，避免同一則訊息被重複投遞時寫入兩筆一樣的稽核紀錄。
+     */
+    boolean existsByEventKey(String eventKey);
 }

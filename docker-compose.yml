@@ -14,7 +14,7 @@ services:
       - mysql_data:/var/lib/mysql
     command: --default-authentication-plugin=mysql_native_password
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      test: [ "CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD}" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -29,7 +29,7 @@ services:
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      test: [ "CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -46,12 +46,114 @@ services:
     volumes:
       - mongo_data:/data/db
       - mongo_config:/data/configdb
+      # Atlas Local 的 mongot 索引也必須持久化，否則容器重建後可能反覆初始化。
+      - mongo_mongot:/data/mongot
     healthcheck:
-      test: [ "CMD", "mongosh", "--quiet", "--eval", "try { rs.status().ok === 1 && rs.status().members.some(m => m.stateStr === 'PRIMARY') } catch(e) { false }" ]
+      test: [ "CMD-SHELL", "mongosh --quiet --host 127.0.0.1 --username \"$${MONGODB_INITDB_ROOT_USERNAME}\" --password \"$${MONGODB_INITDB_ROOT_PASSWORD}\" --authenticationDatabase admin --eval \"db.adminCommand({ping: 1}).ok\" | grep -q '^1$'" ]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 15s
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.4.3
+    container_name: dessert-elasticsearch
+    restart: always
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1" ]
       interval: 10s
       timeout: 10s
       retries: 15
       start_period: 30s
+
+  elasticsearch-exporter:
+    image: quay.io/prometheuscommunity/elasticsearch-exporter:latest
+    container_name: dessert-elasticsearch-exporter
+    restart: always
+    command:
+      - "--es.uri=http://elasticsearch:9200"
+    ports:
+      - "9114:9114"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: dessert-kafka
+    restart: always
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      # KRaft 模式:不需要額外的 ZooKeeper 容器,broker 與 controller 角色合一
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      CLUSTER_ID: "dessert-kraft-cluster-01"
+    healthcheck:
+      test: [ "CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1" ]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: dessert-kafka-ui
+    restart: always
+    ports:
+      - "8081:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: dessert-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: dessert-prometheus
+    restart: always
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      - app
+
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: dessert-grafana
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/provisioning/dashboards/dashboards-json:/etc/grafana/provisioning/dashboards/dashboards-json:ro
+    depends_on:
+      - prometheus
+
 
   app:
     build:
@@ -69,8 +171,13 @@ services:
       - SPRING_DATA_REDIS_PORT=6379
       - SPRING_DATA_REDIS_PASSWORD=${REDIS_PASSWORD}
       - APP_RAG_VECTORSTORE_MODE=mongodb-atlas
-      - SPRING_DATA_MONGODB_URI=mongodb://root:${MONGO_ROOT_PASSWORD}@mongodb:27017/dessert_mongo_db?authSource=admin
+      # Atlas Local 會自動產生副本集名稱，不固定是 rs0；使用直連避免 driver
+      # 因為 replicaSet 名稱不符或發現容器 hostname 而反覆失敗。
+      - SPRING_DATA_MONGODB_URI=mongodb://root:${MONGO_ROOT_PASSWORD}@mongodb:27017/dessert_mongo_db?authSource=admin&directConnection=true
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - SPRING_DEBUG=true
+      - SPRING_ELASTICSEARCH_URIS=http://elasticsearch:9200
     depends_on:
       mysql:
         condition: service_healthy
@@ -78,9 +185,21 @@ services:
         condition: service_healthy
       mongodb:
         condition: service_healthy
+      kafka:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
 
 volumes:
   mysql_data:
   redis_data:
   mongo_data:
   mongo_config:
+  prometheus_data:
+  grafana_data:
+  es_data:
+  mongo_mongot:
+
+networks:
+  default:
+    name: dessert-network

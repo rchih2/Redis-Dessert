@@ -54,5 +54,10 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     @Transactional
     @Query("UPDATE Order o SET o.deleted = true WHERE o.deleted = false")
     int softDeleteAll();
+    /**
+     * 依登入使用者查詢自己的訂單（未軟刪除），依下單時間倒序，
+     * 供「查詢我自己的訂單」端點使用。
+     */
+    List<Order> findByUsernameAndDeletedFalseOrderByOrderTimeDesc(String username);
 
 }

@@ -7,6 +7,8 @@ import com.gtalent.redis.dessert.service.InsufficientStockException;
 import com.gtalent.redis.dessert.service.ReadOnlyFieldException; // 新增：name 欄位在建立後唯讀，PUT 更改時拋出
 import com.gtalent.redis.dessert.model.Dessert;
 import com.gtalent.redis.dessert.repository.DessertRepository;
+import com.gtalent.redis.dessert.metrics.BusinessMetrics;
+import com.gtalent.redis.dessert.search.DessertSearchIndexService;
 import com.gtalent.redis.dessert.service.DessertService;
 import jakarta.persistence.EntityNotFoundException;
 import lombok.RequiredArgsConstructor;
@@ -17,6 +19,9 @@ import org.springframework.stereotype.Service;
 import java.time.Duration;
 import java.util.List;
 import java.util.Set;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 @Slf4j
 @Service
@@ -29,6 +34,12 @@ public class DessertServiceImpl implements DessertService {
     private final DessertRepository dessertRepository;
     private final StringRedisTemplate stringRedisTemplate;
     private final JsonMapper objectMapper;
+    // 新增：Elasticsearch 搜尋索引同步。跟 Redis 快取一樣是「附帶效果」，
+    // 同步失敗只記 log，不影響甜點 CRUD 這條主流程（見 DessertSearchIndexService 說明）。
+    private final DessertSearchIndexService dessertSearchIndexService;
+    // 新增：庫存 Gauge / 低庫存警示指標。跟 Redis 快取、Elasticsearch 索引一樣是「附帶效果」，
+    // 只更新指標數值，不影響甜點 CRUD 主流程。
+    private final BusinessMetrics businessMetrics;
 
     @Override
     public Dessert create(Dessert dessert) {
@@ -39,13 +50,16 @@ public class DessertServiceImpl implements DessertService {
         // 防止前端傳入 deleted=true 的異常資料，或未來欄位被誤用
         dessert.setDeleted(false);
 
-        // 軟刪除修改：原本用 existsByName()，改成只檢查「未被刪除」的資料，
-        // 避免舊的、已軟刪除的同名品項擋住新品項的新增
+        // 只檢查「未被刪除」的資料，避免舊的、已軟刪除的同名品項擋住新品項的新增
         if (dessertRepository.existsByNameAndDeletedFalse(dessert.getName())) {
             throw new DuplicateNameException("「" + dessert.getName() + "」已存在，不可新增重複名稱的品項");
         }
 
-        return dessertRepository.save(dessert);
+        Dessert created = dessertRepository.save(dessert);
+        dessertSearchIndexService.index(created);
+        // 新增：新品項上架時，同步把初始庫存寫進 dessert_inventory Gauge
+        businessMetrics.updateInventory(created.getId(), created.getName(), created.getStock());
+        return created;
     }
 
     @Override
@@ -64,11 +78,13 @@ public class DessertServiceImpl implements DessertService {
             Dessert cached = deserialize(cachedJson);
             if (cached != null) {
                 log.debug("Cache hit: {}", cacheKey);
+                businessMetrics.recordCacheHit();
                 return cached;
             }
         }
 
         log.debug("Cache miss: {}, querying MySQL", cacheKey);
+        businessMetrics.recordCacheMiss();
 
         // 軟刪除修改：改用 findByIdAndDeletedFalse()，
         // 就算 Redis 沒快取到、直接查資料庫，遇到已刪除的品項一樣視為「找不到」
@@ -120,6 +136,13 @@ public class DessertServiceImpl implements DessertService {
         // 更新後，刪除舊快取，讓下次查詢重新回寫最新資料
         evictCache(id);
 
+        // 同步更新 Elasticsearch 索引，讓搜尋結果反映最新的價格/庫存/上架狀態
+        dessertSearchIndexService.index(updated);
+
+        // 新增：庫存/上架狀態可能因為這次更新而改變，同步更新 dessert_inventory Gauge
+        // 與低庫存警示計數
+        businessMetrics.updateInventory(updated.getId(), updated.getName(), updated.getStock());
+
         return updated;
     }
 
@@ -139,6 +162,9 @@ public class DessertServiceImpl implements DessertService {
         dessertRepository.save(dessert);
 
         evictCache(id);
+
+        // 軟刪除的甜點不應再出現在搜尋結果裡，一併從 Elasticsearch 索引移除
+        dessertSearchIndexService.remove(id);
     }
 
     @Override
@@ -152,6 +178,9 @@ public class DessertServiceImpl implements DessertService {
         List<Dessert> desserts = dessertRepository.findByDeletedFalse();
         desserts.forEach(d -> d.setDeleted(true));
         dessertRepository.saveAll(desserts);
+
+        // 批次軟刪除的甜點一併從 Elasticsearch 索引移除，避免搜尋結果出現已刪除品項
+        dessertSearchIndexService.removeAll(desserts.stream().map(Dessert::getId).toList());
 
         // 軟刪除修改：不再呼叫 resetAutoIncrement()。
         // 因為資料列並沒有真的從表裡消失，continue 用原本的自增序號即可，
@@ -186,6 +215,31 @@ public class DessertServiceImpl implements DessertService {
         // 扣庫存成功後，Redis 裡的舊庫存數字就過期了，清掉快取，下次查詢會回寫最新值
         evictCache(id);
         log.debug("扣庫存成功: dessertId={}, quantity={}", id, quantity);
+
+        // 新增：扣庫存這個原子 UPDATE 不會回傳更新後的庫存數字，
+        // 為了讓 dessert_inventory Gauge / dessert_low_stock_total 反映正確的即時庫存，
+        // 這裡多查一次最新資料；查詢失敗（理論上不會，因為上面剛確認過存在）就略過指標更新，
+        // 不影響扣庫存本身已經成功的結果。
+        dessertRepository.findByIdAndDeletedFalse(id)
+                .ifPresent(current -> businessMetrics.updateInventory(current.getId(), current.getName(), current.getStock()));
+    }
+
+    @Override
+    public void purge(Long id) {
+        // 管理用實體刪除：不檢查 deleted 狀態（軟刪除或未刪除的資料都能被實體清除），
+        // 只確認 id 是否存在。
+        if (!dessertRepository.existsById(id)) {
+            throw new EntityNotFoundException("找不到 id=" + id + " 的甜點");
+        }
+
+        dessertRepository.deleteById(id);
+
+        // 修正原本 purgeDessert() 的落差：實體刪除後同步清 Redis 快取，
+        // 避免 TTL 到期前 GET /api/desserts/{id} 仍查到已刪除的舊資料。
+        evictCache(id);
+
+        // 同步從 Elasticsearch 搜尋索引移除，避免搜尋結果出現已被實體刪除的品項。
+        dessertSearchIndexService.remove(id);
     }
 
     private String buildCacheKey(Long id) {
@@ -214,6 +268,72 @@ public class DessertServiceImpl implements DessertService {
         String cacheKey = buildCacheKey(id);
         Boolean deleted = stringRedisTemplate.delete(cacheKey);
         log.debug("刪除快取 key={}, 結果={}", cacheKey, deleted);
+    }
+    @Override
+    public Map<String, Object> purgeAll(List<Long> ids, boolean resetSequence) {
+        List<Long> distinctIds;
+
+        if (ids == null || ids.isEmpty()) {
+            // 未指定 id 清單 → 視為「刪除全部」
+            distinctIds = dessertRepository.findAll().stream()
+                    .map(Dessert::getId)
+                    .distinct()
+                    .toList();
+            log.info("[DessertServiceImpl] 批次實體刪除未指定 id 清單，視為刪除全部，共 {} 筆", distinctIds.size());
+        } else {
+            distinctIds = ids.stream().distinct().toList();
+        }
+
+        List<Long> succeededIds = new ArrayList<>();
+        List<Map<String, Object>> failed = new ArrayList<>();
+
+        for (Long id : distinctIds) {
+            if (!dessertRepository.existsById(id)) {
+                Map<String, Object> failure = new LinkedHashMap<>();
+                failure.put("id", id);
+                failure.put("reason", "找不到 id=" + id + " 的甜點，可能已被刪除或從未存在");
+                failed.add(failure);
+                log.warn("[DessertServiceImpl] 批次實體刪除跳過，找不到甜點 id={}", id);
+                continue;
+            }
+
+            try {
+                dessertRepository.deleteById(id);
+                evictCache(id);
+                succeededIds.add(id);
+            } catch (Exception e) {
+                Map<String, Object> failure = new LinkedHashMap<>();
+                failure.put("id", id);
+                failure.put("reason", "刪除失敗: " + e.getMessage());
+                failed.add(failure);
+                log.warn("[DessertServiceImpl] 批次實體刪除失敗，id={}", id, e);
+            }
+        }
+
+        if (!succeededIds.isEmpty()) {
+            dessertSearchIndexService.removeAll(succeededIds);
+        }
+
+        boolean sequenceReset = false;
+        if (resetSequence) {
+            try {
+                dessertRepository.resetAutoIncrement();
+                sequenceReset = true;
+                log.warn("[DessertServiceImpl] 已重置 dessert 表 AUTO_INCREMENT 為 1，"
+                        + "下一筆新增甜點的 id 將從 1 開始，請確認沒有歷史訂單快照引用被重用的 id");
+            } catch (Exception e) {
+                log.error("[DessertServiceImpl] 重置 AUTO_INCREMENT 失敗", e);
+            }
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("success", failed.isEmpty());
+        result.put("successCount", succeededIds.size());
+        result.put("failedCount", failed.size());
+        result.put("succeededIds", succeededIds);
+        result.put("failed", failed);
+        result.put("sequenceReset", sequenceReset);
+        return result;
     }
 
 }

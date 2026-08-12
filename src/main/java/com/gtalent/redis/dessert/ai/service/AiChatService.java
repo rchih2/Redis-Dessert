@@ -7,7 +7,10 @@ import com.gtalent.redis.dessert.ai.message.keyword.KeywordRule;
 import com.gtalent.redis.dessert.ai.model.ActionLog;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import io.micrometer.core.instrument.Timer;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.metadata.Usage;
+import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.PromptTemplate;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.SearchRequest;
@@ -22,7 +25,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
-
+import com.gtalent.redis.dessert.event.AiQaEvent;
+import com.gtalent.redis.dessert.event.EventPublisherService;
+import com.gtalent.redis.dessert.metrics.BusinessMetrics;
+import com.gtalent.redis.dessert.ai.metrics.AiMetrics;
 /**
  * 甜點 AI 顧問對話服務。
  *
@@ -52,6 +58,9 @@ public class AiChatService {
     private final ChatClient chatClient;
     private final MongoDataTrackingService mongoDataTrackingService;
     private final KeywordChatService keywordChatService;
+    private final EventPublisherService eventPublisherService;
+    private final BusinessMetrics businessMetrics;
+    private final AiMetrics aiMetrics;
 
     @Value("${spring.ai.google.genai.chat.options.model:unknown}")
     private String modelName;
@@ -90,25 +99,45 @@ public class AiChatService {
             throw new IllegalArgumentException("sessionId 與 message 皆為必填");
         }
 
-        List<Document> hits = resolveHits(message);
-        boolean ragHit = !hits.isEmpty();
+        // AI 業務指標：進入主流程即計入一次「AI 問答次數」，並開始量測整體回應時間
+        // （涵蓋關鍵字比對／向量檢索／LLM 呼叫），供 Grafana「AI Assistant Dashboard」使用。
+        aiMetrics.recordChatStarted();
+        Timer.Sample chatTimer = aiMetrics.startChatTimer();
 
-        String systemPrompt = ragHit
-                ? buildContextPrompt(hits)
-                : SYSTEM_PROMPT_FALLBACK;
+        try {
+            List<Document> hits = resolveHits(message);
+            boolean ragHit = !hits.isEmpty();
 
-        String reply = callLlm(systemPrompt, message, sessionId);
+            String systemPrompt = ragHit
+                    ? buildContextPrompt(hits)
+                    : SYSTEM_PROMPT_FALLBACK;
+            // 新增：量測 LLM 呼叫耗時，用於填入 ai-qa-events 的 responseTimeMs 欄位，
+            // 這是「AI 業務指標」（Gemini API 呼叫延遲）的資料來源之一，
+            // 跟 Prometheus 量的是系統層級指標（API p99、5xx 等）是不同層次的觀測。
+            long startTime = System.currentTimeMillis();
+            String reply = callLlm(systemPrompt, message, sessionId);
+            long responseTimeMs = System.currentTimeMillis() - startTime;
 
-        // 側錄寫入 MongoDB；就算失敗也不應該讓使用者拿不到 AI 回覆
-        recordSideEffects(sessionId, message, reply, ragHit, hits);
+            // 側錄寫入 MongoDB；就算失敗也不應該讓使用者拿不到 AI 回覆
+            recordSideEffects(sessionId, message, reply, ragHit, hits, responseTimeMs);
 
-        return ChatResponseDTO.builder()
-                .sessionId(sessionId)
-                .reply(reply)
-                .ragHit(ragHit)
-                .contextDocCount(hits.size())
-                .timestamp(LocalDateTime.now())
-                .build();
+            // 業務指標：AI 顧問成功產生一次回覆，計入「AI 推薦次數」
+            businessMetrics.recordAiRecommend();
+            // 對話成功：停止計時、累加 ai_chat_success_total，讓 success/total 能算出成功率
+            aiMetrics.recordChatSuccess(chatTimer);
+
+            return ChatResponseDTO.builder()
+                    .sessionId(sessionId)
+                    .reply(reply)
+                    .ragHit(ragHit)
+                    .contextDocCount(hits.size())
+                    .timestamp(LocalDateTime.now())
+                    .build();
+        } catch (RuntimeException e) {
+            // 對話失敗（例如 LLM 呼叫失敗）：一樣要停止計時，但不計入成功次數
+            aiMetrics.recordChatFailure(chatTimer);
+            throw e;
+        }
     }
 
     /**
@@ -135,6 +164,9 @@ public class AiChatService {
             return List.of(keywordDocument);
         }
 
+        // AI 業務指標：關鍵字沒命中，改走向量檢索 + LLM 生成，
+        // 這個計數同時也代表「Gemini 呼叫次數」（見 AiMetrics#recordKeywordFallback 說明）
+        aiMetrics.recordKeywordFallback();
         return safeSimilaritySearch(message);
     }
 
@@ -148,6 +180,8 @@ public class AiChatService {
     }
 
     private List<Document> safeSimilaritySearch(String message) {
+        // AI 業務指標：量測這次向量檢索的耗時、命中筆數與相似度分數
+        Timer.Sample vectorSearchTimer = aiMetrics.startVectorSearchTimer();
         try {
             SearchRequest searchRequest = SearchRequest.builder()
                     .query(message)
@@ -156,9 +190,13 @@ public class AiChatService {
                     .build();
 
             List<Document> results = vectorStore.similaritySearch(searchRequest);
-            return results == null ? List.of() : results;
+            List<Document> hits = results == null ? List.of() : results;
+            aiMetrics.recordVectorSearch(vectorSearchTimer, hits);
+            return hits;
         } catch (Exception e) {
-            // 向量庫查詢失敗不應該讓整個對話掛掉，降級用 fallback prompt 繼續走完流程
+            // 向量庫查詢失敗不應該讓整個對話掛掉，降級用 fallback prompt 繼續走完流程；
+            // 指標一樣要記錄（耗時 + 零命中），才能反映真實的失敗延遲與命中率
+            aiMetrics.recordVectorSearch(vectorSearchTimer, List.of());
             log.warn("[AiChatService] VectorStore 相似度檢索失敗，改用 fallback prompt，message={}", message, e);
             return List.of();
         }
@@ -181,15 +219,24 @@ public class AiChatService {
 
     private String callLlm(String systemPrompt, String userMessage, String sessionId) {
         try {
-            String content = chatClient.prompt()
+            ChatResponse chatResponse = chatClient.prompt()
                     .system(systemPrompt)
                     .user(userMessage)
                     .call()
-                    .content();
+                    .chatResponse();
+
+            String content = chatResponse == null || chatResponse.getResult() == null
+                    ? null
+                    : chatResponse.getResult().getOutput().getText();
 
             if (!StringUtils.hasText(content)) {
                 throw new AiChatException("LLM 回傳空回覆");
             }
+
+            // AI 業務指標：Token 使用量（成本監控）。部分模型/情境可能不回傳 usage 資訊，
+            // 讀取失敗只記 debug log，不影響已經取得的回覆內容。
+            recordTokenUsage(chatResponse);
+
             return content;
         } catch (AiChatException e) {
             throw e;
@@ -199,8 +246,27 @@ public class AiChatService {
         }
     }
 
+    /**
+     * 從 {@link ChatResponse#getMetadata()} 讀取這次 LLM 呼叫的 token 用量（prompt + completion），
+     * 累加進 {@code ai_total_tokens}。不同模型／情境下 usage 資訊可能缺漏，
+     * 讀取過程刻意用 try-catch 包起來，避免因為 metadata 結構差異影響到已經產生的 AI 回覆。
+     */
+    private void recordTokenUsage(ChatResponse chatResponse) {
+        try {
+            if (chatResponse == null || chatResponse.getMetadata() == null) {
+                return;
+            }
+            Usage usage = chatResponse.getMetadata().getUsage();
+            if (usage != null && usage.getTotalTokens() != null) {
+                aiMetrics.recordTokens(usage.getTotalTokens());
+            }
+        } catch (Exception e) {
+            log.debug("[AiChatService] 讀取 token usage 失敗，略過本次 token 計量", e);
+        }
+    }
+
     private void recordSideEffects(String sessionId, String userMessage, String aiReply,
-                                   boolean ragHit, List<Document> hits) {
+                                   boolean ragHit, List<Document> hits, long responseTimeMs) {
         List<String> sourceIds = hits.stream()
                 .map(this::extractSourceId)
                 .filter(StringUtils::hasText)
@@ -239,8 +305,37 @@ public class AiChatService {
         } catch (Exception e) {
             log.error("[AiChatService] 寫入 ActionLog 失敗, sessionId={}", sessionId, e);
         }
+
+        // 新增：發布 ai-qa-events 事件到 Kafka，供 EventLogConsumer 非同步落地成
+        // 另一份稽核紀錄，同時作為「事件驅動架構」的展示資料來源。
+        // 發送失敗只記 log，不影響已經回傳給使用者的 AI 回覆。
+        try {
+            String intent = resolveIntent(hits, ragHit);
+            eventPublisherService.publishAiQaEvent(new AiQaEvent(
+                    sessionId,
+                    userMessage,
+                    intent,
+                    sourceIds,
+                    responseTimeMs,
+                    LocalDateTime.now()
+            ));
+        } catch (Exception e) {
+            log.error("[AiChatService] 發布 ai-qa-events 失敗, sessionId={}", sessionId, e);
+        }
     }
 
+    /**
+     * 新增：把「關鍵字命中 / 向量檢索命中 / 皆未命中」轉成給 ai-qa-events 用的 intent 字串，
+     * 沿用 resolveHits() 裡標記的 metadata.source 判斷依據，不重複實作比對邏輯。
+     */
+    private String resolveIntent(List<Document> hits, boolean ragHit) {
+        if (!ragHit) {
+            return "fallback";
+        }
+        boolean keywordHit = hits.stream()
+                .anyMatch(d -> d.getMetadata() != null && "keyword-rule".equals(d.getMetadata().get("source")));
+        return keywordHit ? "keyword-rule" : "rag";
+    }
     /*
      * ============================================================================
      * 替代寫法（可選）：關鍵字命中時完全跳過 LLM，直接回傳 CSV 原文

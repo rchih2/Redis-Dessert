@@ -63,5 +63,13 @@ public class Order {
         items.add(item);
         item.setOrder(this);
     }
-
+    /**
+     * 建立此訂單的登入使用者帳號（對應 users.username），與 customerName 分開存放：
+     * customerName/phone 是「收件人資訊」（可能是代訂給別人），username 才是「誰下的單」，
+     * 用於「查詢我自己的訂單」功能。可為 null——理論上目前 SecurityConfig 規則要求
+     * POST /api/orders 必須已登入，所以正常流程一定會有值；保留 nullable 是為了
+     * 相容測試環境或未來若開放訪客下單的彈性，不強制加 NOT NULL 約束。
+     */
+    @Column(name = "username", length = 50)
+    private String username;
 }

@@ -137,10 +137,70 @@
 			<artifactId>spring-boot-starter-test</artifactId>
 			<scope>test</scope>
 		</dependency>
+
 		<dependency>
 			<groupId>org.apache.commons</groupId>
 			<artifactId>commons-csv</artifactId>
 			<version>1.11.0</version>
+		</dependency>
+		<!-- 事件驅動架構：Kafka producer/consumer 支援。
+             版本不手動指定，交給 spring-boot-starter-parent(4.1.0) 的 BOM 統一管理，
+             確保跟目前實際使用的 Spring Boot 4.1.0 相容，避免憑記憶亂填版本號。 -->
+		<dependency>
+			<groupId>org.springframework.kafka</groupId>
+			<artifactId>spring-kafka</artifactId>
+		</dependency>
+
+		<!-- 系統監控：Actuator 暴露 /actuator/prometheus 等端點 -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
+
+		<!-- 系統監控：把 Micrometer 蒐集到的指標轉換成 Prometheus 可 scrape 的文字格式 -->
+		<dependency>
+			<groupId>io.micrometer</groupId>
+			<artifactId>micrometer-registry-prometheus</artifactId>
+		</dependency>
+		<!-- 新增：Elasticsearch 全文/模糊搜尋。與 MongoDB Atlas 向量庫是不同的東西——
+             VectorStore 服務的是 AI/RAG 語意檢索，這裡的 Elasticsearch 服務的是
+             一般站內「甜點搜尋」這種傳統關鍵字/模糊比對場景，兩者並存、互不取代。 -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-data-elasticsearch</artifactId>
+		</dependency>
+		<!-- 新增：即時同步 Elasticsearch 索引時的重試機制（DessertSearchIndexService 的 @Retryable），
+     搭配 DessertSearchSyncScheduler 的定期排程，兩層機制確保 MySQL → Elasticsearch 不會漏同步。
+     spring-aspects 已在既有相依中（Spring AI 透過 BOM 帶入），@Retryable 所需的 AOP 支援不用另外加。 -->
+		<dependency>
+			<groupId>org.springframework.retry</groupId>
+			<artifactId>spring-retry</artifactId>
+			<version>2.0.13</version>
+		</dependency>
+
+		<!-- RBAC:Spring Security 核心 -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-security</artifactId>
+		</dependency>
+
+		<!-- RBAC:JWT 產生/驗證(jjwt 0.12.x API,若 Maven Central 有更新版號請自行核對後調整) -->
+		<dependency>
+			<groupId>io.jsonwebtoken</groupId>
+			<artifactId>jjwt-api</artifactId>
+			<version>0.12.6</version>
+		</dependency>
+		<dependency>
+			<groupId>io.jsonwebtoken</groupId>
+			<artifactId>jjwt-impl</artifactId>
+			<version>0.12.6</version>
+			<scope>runtime</scope>
+		</dependency>
+		<dependency>
+			<groupId>io.jsonwebtoken</groupId>
+			<artifactId>jjwt-jackson</artifactId>
+			<version>0.12.6</version>
+			<scope>runtime</scope>
 		</dependency>
 	</dependencies>
 
@@ -201,27 +261,5 @@
 			</build>
 		</profile>
 	</profiles>
-
-	<!-- Spring AI 2.0.0 已是正式 GA 版本，可直接從 Maven Central 取得，
-	     理論上不再需要 spring-milestones / spring-snapshots；
-	     保留這段是為了方便未來想搶先試用 milestone 版（如 2.1.0-M1）時直接使用。 -->
-	<repositories>
-		<repository>
-			<id>spring-milestones</id>
-			<name>Spring Milestones</name>
-			<url>https://repo.spring.io/milestone</url>
-			<snapshots>
-				<enabled>false</enabled>
-			</snapshots>
-		</repository>
-		<repository>
-			<id>spring-snapshots</id>
-			<name>Spring Snapshots</name>
-			<url>https://repo.spring.io/snapshot</url>
-			<releases>
-				<enabled>false</enabled>
-			</releases>
-		</repository>
-	</repositories>
 
 </project>

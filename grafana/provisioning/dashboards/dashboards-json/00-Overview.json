@@ -1,0 +1,26 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [],
+  "refresh": "10s",
+  "schemaVersion": 40,
+  "style": "dark",
+  "tags": [
+    "dessert",
+    "overview"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "00 - Executive Overview",
+  "uid": "dessert-overview",
+  "version": 1
+}

@@ -37,6 +37,7 @@ public class ActionLog {
      */
     public enum ActionType {
         ORDER_CREATE,   // 下單
+        ORDER_CANCEL,   // 取消訂單（軟刪除，非實體刪除）
         ORDER_QUERY,    // 查詢訂單
         DESSERT_QUERY,  // 查詢甜點
         LOGIN,          // 登入
@@ -69,4 +70,17 @@ public class ActionLog {
     @Indexed
     @Field("timestamp")
     private LocalDateTime timestamp;
+
+    /**
+     * 事件去重識別碼（僅由 EventLogConsumer 寫入，組合方式：{orderId}:{eventType}）。
+     *
+     * <p>Kafka 是 at-least-once 語意，同一則訊息可能被重複投遞，消費端用這個欄位
+     * 搭配 {@code ActionLogRepository#existsByEventKey} 判斷「這個事件是不是已經處理過」，
+     * 避免同一筆訂單事件被寫入兩次稽核紀錄。既有由 AiChatService 直接同步寫入的
+     * ActionLog（AI_CHAT）不會帶這個欄位（維持 null），因此可以用它來分辨
+     * 「這筆紀錄是走 Kafka 事件流進來的、還是原本的同步寫入」。</p>
+     */
+    @Indexed
+    @Field("event_key")
+    private String eventKey;
 }

@@ -1,0 +1,19 @@
+{
+  "index": {
+    "analysis": {
+      "analyzer": {
+        "dessert_name_analyzer": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": ["lowercase", "dessert_cjk_bigram"]
+        }
+      },
+      "filter": {
+        "dessert_cjk_bigram": {
+          "type": "cjk_bigram",
+          "output_unigrams": true
+        }
+      }
+    }
+  }
+}

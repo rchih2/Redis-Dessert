@@ -1,0 +1,112 @@
+spring:
+  application:
+    name: redis-dessert
+
+  ai:
+    google:
+      genai:
+        api-key: ${GOOGLE_API_KEY}
+        chat:
+          options:
+            model: gemini-2.5-flash
+        embedding:
+          api-key: ${GOOGLE_API_KEY}
+          options:
+            model: gemini-embedding-001
+            dimensions: 768
+    vectorstore:
+      mongodb:
+        initialize-schema: true
+
+  # MySQL 設定
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/dessert_db?serverTimezone=Asia/Taipei&useSSL=false&allowPublicKeyRetrieval=true}
+    username: ${SPRING_DATASOURCE_USERNAME:user}
+    password: ${SPRING_DATASOURCE_PASSWORD:123}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 5
+      connection-timeout: 30000
+
+  # JPA 設定
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQLDialect
+
+  # Redis 設定（保留在 spring.data.redis 下，Redis 前綴沒有變動）
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+      password: ${SPRING_DATA_REDIS_PASSWORD:123}
+      database: 0
+      timeout: 2000ms
+
+  # MongoDB 設定：Spring Boot 4.x 起前綴改為 spring.mongodb，移除了 .data 這段
+  mongodb:
+    uri: ${SPRING_DATA_MONGODB_URI:mongodb://root:123@localhost:27017/dessert_ai_db?authSource=admin}
+
+  # Kafka 設定（事件驅動架構）
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
+      acks: all
+      retries: 3
+    consumer:
+      group-id: event-log-consumer
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JacksonJsonDeserializer
+    properties:
+      spring.json.trusted.packages: "com.gtalent.redis.dessert.event"
+    # spring.json.use.type.headers 可以刪掉，JacksonJsonDeserializer.USE_TYPE_INFO_HEADERS 預設就是 true
+
+  # Elasticsearch 設定：只服務甜點全文/模糊搜尋，與 MongoDB Atlas 那邊的 AI 向量庫是兩條獨立管線
+  elasticsearch:
+    uris: ${SPRING_ELASTICSEARCH_URIS:http://localhost:9200}
+    connection-timeout: 5s
+    socket-timeout: 10s
+
+# 系統監控（Prometheus / Actuator）
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  endpoint:
+    health:
+      show-details: when-authorized
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+server:
+  error:
+    include-message: always
+    include-stacktrace: always
+    include-binding-errors: always
+
+# RAG 向量資料庫配置 + 甜點搜尋自動同步配置
+app:
+  rag:
+    vector-store:
+      mode: ${APP_RAG_VECTORSTORE_MODE:mongodb-atlas}
+    chunk:
+      chunk-size: 500
+      min-chunk-size-chars: 200
+      min-chunk-length-to-embed: 10
+      max-num-chunks: 10000
+    chat:
+      top-k: 4
+      similarity-threshold: 0.5
+  search:
+    sync:
+      enabled: ${APP_SEARCH_SYNC_ENABLED:true}              # false 可整組關閉自動排程（例如測試環境）
+      interval-ms: ${APP_SEARCH_SYNC_INTERVAL_MS:300000}     # 定期全量同步間隔，預設 5 分鐘

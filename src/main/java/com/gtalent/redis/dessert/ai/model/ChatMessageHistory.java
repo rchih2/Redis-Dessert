@@ -90,4 +90,12 @@ public class ChatMessageHistory {
     /** 其他彈性擴充欄位（例如使用者評分、回應延遲毫秒數等）。 */
     @Field("metadata")
     private Map<String, Object> metadata;
+
+    /**
+     * 事件去重識別碼（僅由 EventLogConsumer 寫入，組合方式：{sessionId}:{occurredAt}）。
+     * 用途同 ActionLog.eventKey，見該處說明。
+     */
+    @Indexed
+    @Field("event_key")
+    private String eventKey;
 }

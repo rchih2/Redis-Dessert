@@ -44,16 +44,16 @@ public interface DessertRepository extends JpaRepository<Dessert, Long> {
     int deductStock(@Param("id") Long id, @Param("quantity") Integer quantity);
 
     /**
-     * 檢查名稱是否已存在，用來擋「新增重複名稱的甜點」。
+     * 檢查「未被刪除」的資料是否已存在同名甜點，用來擋「新增重複名稱的甜點」。
      * Spring Data JPA 會依方法名稱自動產生對應的 SQL，不用自己寫 @Query。
      *
-     * 軟刪除新增方法：existsByNameAndDeletedFalse
-     * 原本的 existsByName() 已停用（不刪除是因為改名容易，但避免忘記換掉呼叫處造成誤判）。
      * 只檢查「還沒被刪除」的資料，避免「已刪除品項的名稱」把新品項的名稱擋住，
      * 導致使用者想新增一個跟舊資料同名的品項時，被誤判成重複而失敗。
+     *
+     * （技術文件第 9 節「建議後續工作」第 3 項：原本還留有一個等效但沒有
+     * 排除已刪除資料的 existsByName(String) 舊方法，確認全專案沒有任何呼叫端
+     * 使用後已移除，只保留這個目前實際在用的版本。）
      */
-    boolean existsByName(String name);
-
     boolean existsByNameAndDeletedFalse(String name);
 
     /**

@@ -36,4 +36,8 @@ public interface ChatMessageHistoryRepository extends MongoRepository<ChatMessag
      * 統計某使用者總共發問幾次，可作為後台儀表板指標或 rate-limit 判斷依據。
      */
     long countByUserId(String userId);
+    /**
+     * 判斷某個事件去重鍵是否已經處理過，用途同 ActionLogRepository#existsByEventKey。
+     */
+    boolean existsByEventKey(String eventKey);
 }
