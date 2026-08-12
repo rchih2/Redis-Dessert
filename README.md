@@ -3,7 +3,7 @@
 一個以 Spring Boot 打造的甜點訂購系統，整合 MySQL + Redis 的主流程交易資料，
 搭配 MongoDB + Spring AI 的 RAG 智慧客服模組，並加入 Elasticsearch 全文搜尋、
 Kafka 事件驅動、Spring Security JWT 角色權限控制，以及 Prometheus + Grafana 監控儀表板。
- <img width="1898" height="777" alt="image" src="https://github.com/user-attachments/assets/36d78897-9f3b-4631-9f5b-403b8bf7edfc" /># 甜點訂購系統（redis-dessert）
+<img width="1536" height="1024" alt="甜點訂購系統技術i架構圖v19" src="https://github.com/user-attachments/assets/3e573f56-21be-42d2-a284-86fb26a0d562" />
 ## 目錄
 
 - [技術棧](#技術棧)
@@ -151,8 +151,8 @@ mvn test -Dgroups=integration
 
 - 系統指標（API 延遲、錯誤率、JVM 狀態）透過 `/actuator/prometheus` 暴露，由 Prometheus 定期蒐集
 - 業務指標包含訂單金額、甜點庫存、AI 對話成功率等，於 Grafana 儀表板呈現
-<img width="1536" height="1024" alt="甜點訂購系統技術i架構圖v19" src="https://github.com/user-attachments/assets/3e573f56-21be-42d2-a284-86fb26a0d562" />
 
+ <img width="1898" height="777" alt="image" src="https://github.com/user-attachments/assets/36d78897-9f3b-4631-9f5b-403b8bf7edfc" /># 甜點訂購系統（redis-dessert）
 
 ## 已知限制
 
