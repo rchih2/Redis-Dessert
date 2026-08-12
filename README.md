@@ -1,4 +1,4 @@
-# 甜點訂購系統（redis-dessert）
+<img width="1898" height="777" alt="image" src="https://github.com/user-attachments/assets/36d78897-9f3b-4631-9f5b-403b8bf7edfc" /># 甜點訂購系統（redis-dessert）
 
 一個以 Spring Boot 打造的甜點訂購系統，整合 MySQL + Redis 的主流程交易資料，
 搭配 MongoDB + Spring AI 的 RAG 智慧客服模組，並加入 Elasticsearch 全文搜尋、
@@ -124,7 +124,7 @@ docker compose ps
 | `app.admin-init.username` | `ADMIN_INIT_USERNAME` | `admin` |
 | `app.admin-init.password` | `ADMIN_INIT_PASSWORD` | `admin123` |
 
-> ⚠️ 此密碼僅適合本機開發使用，正式環境請務必修改。
+
 
 ## API 文件
 
